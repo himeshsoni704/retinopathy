@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+.venv/
+.env
+.env.*
+data/
+runs/
+weights/
+*.pt
+*.pth
+*.joblib

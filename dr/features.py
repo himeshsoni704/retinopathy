@@ -11,6 +11,7 @@ from .data import Photos, read_manifest
 from .images import FAMILIES
 from .networks import restore
 from .training import device_for, digest, loader
+from .runtime import precision, autocast, environment, Profile, protect_all
 
 U = ["unc_max","unc_entropy","unc_mi","unc_tta"]
 D = ["d_"+f for f in FAMILIES]
@@ -24,12 +25,15 @@ def entropy(p):
 
 def collect(data, args):
     device = device_for(args.device)
+    mode = precision(device, getattr(args,"precision","auto"), training=False)
     batches = loader(data,args)
     checkpoint_paths = [*args.graders, args.damage, args.quality]
     if len(set(map(lambda p:Path(p).resolve(),checkpoint_paths))) != len(checkpoint_paths):
         raise ValueError("Duplicate checkpoint paths")
     meta = {"graders":sorted(digest(p) for p in args.graders),"damage":digest(args.damage),
             "quality":digest(args.quality),"size":args.size}
+    if mode != "fp32":
+        meta["inference_precision"] = mode
     n = len(data)
     mean = np.zeros((n,5))
     view_mean = np.zeros((n,5))
@@ -53,9 +57,9 @@ def collect(data, args):
             seeds.add(ck["seed"])
             arch = ck["arch"]
         start = 0
-        with torch.inference_mode():
+        with torch.inference_mode(), autocast(device, mode):
             for batch in batches:
-                x = batch["x"].to(device)
+                x = batch["x"].to(device, non_blocking=device.type=="cuda")
                 sl = slice(start,start+len(x))
                 if position == 0:
                     rows.extend(zip(batch["image"],batch["patient"],batch["grade"].tolist(),
@@ -72,10 +76,10 @@ def collect(data, args):
                         logits,_ = net(x.flip(dims))
                         view_mean[sl] += (logits.float()/tg).softmax(-1).cpu().numpy()
                 elif expected == "quality":
-                    q[sl] = a.softmax(-1).cpu().numpy()
+                    q[sl] = a.float().softmax(-1).cpu().numpy()
                 else:
-                    kinds[sl] = a.sigmoid().cpu().numpy()
-                    d[sl] = kinds[sl]*b.sigmoid().cpu().numpy()
+                    kinds[sl] = a.float().sigmoid().cpu().numpy()
+                    d[sl] = kinds[sl]*b.float().sigmoid().cpu().numpy()
                 start = sl.stop
         del net
         gc.collect()
@@ -94,10 +98,18 @@ def collect(data, args):
 
 
 def extract(args):
+    output=Path(args.out)
+    protect_all([output,output.with_suffix(".meta.json"),output.with_suffix(".sampling.json")],getattr(args,"overwrite",False))
+    profile = Profile(device_for(args.device))
     frame = read_manifest(args.manifest)
     selected = frame[frame.split == args.split]
     mode = args.mode or ("balanced" if args.split in ("fit","policy") else "natural")
-    data = Photos(selected,args.size,args.seed,mode,exclude=args.exclude)
+    if getattr(args,"condition_profile",None) and mode not in ("balanced","balanced-real","mixture"):
+        raise ValueError("Conditioning is only supported for sampled corruption modes")
+    data = Photos(selected,args.size,args.seed,mode,exclude=args.exclude, cache_dir=getattr(args,"cache_dir",None),
+                  condition_profile=getattr(args,"condition_profile",None),
+                  corruption_size=getattr(args,"corruption_size",None),
+                  donor_patients=frame.loc[frame.split=="train","patient"])
     table,meta = collect(data,args)
     if args.split != "external" and meta["training_manifest"] != digest(args.manifest):
         raise ValueError("Development features require the original training manifest")
@@ -107,5 +119,8 @@ def extract(args):
     path.with_suffix(".meta.json").write_text(json.dumps(meta,indent=2))
     path.with_suffix(".sampling.json").write_text(json.dumps(
         dict(manifest=digest(args.manifest), split=args.split, mode=mode, seed=args.seed,
-             excluded_family=args.exclude, patients=int(table.patient.nunique())), indent=2))
+             excluded_family=args.exclude, corruption_size=getattr(args,"corruption_size",None),
+             condition_profile_sha256=digest(args.condition_profile) if getattr(args,"condition_profile",None) else None,
+             runtime=environment(device_for(args.device)), profile=profile.finish(), patients=int(table.patient.nunique())), indent=2))
     print(f"{len(table)} rows saved to {path}")
+

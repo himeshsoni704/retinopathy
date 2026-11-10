@@ -13,9 +13,11 @@ from sklearn.preprocessing import StandardScaler
 
 from .features import D,Q,U
 from .images import FAMILIES
+from .runtime import protect
 
 COVERAGES = (.8,.9)
 LEARNED = {"U":U,"P5":U+Q,"UD":U+D,"P6":U+D+Q}
+SEMANTIC = ["sem_centroid_distance","sem_norm_deviation"]
 ACQUISITION = {"defocus","motion","vignette","exposure"}
 
 
@@ -58,7 +60,7 @@ def scores(table,bundle):
          "P2":table.unc_tta.to_numpy(),"P3":1-table.q_good.to_numpy(),
          "P4":bundle["scaler"].transform(table[U]).mean(axis=1)}
     for name,model in bundle["models"].items():
-        cols = LEARNED.get(name,U+D+Q)
+        cols = U+D+Q+SEMANTIC if name=="P6S" else LEARNED.get(name,U+D+Q)
         s[name] = model.predict_proba(table[cols])[:,1]
     return s
 
@@ -83,6 +85,7 @@ def retake_threshold(table,deferred,args):
 
 
 def fit(args):
+    protect(args.out, getattr(args,"overwrite",False))
     train, meta = read_table(args.fit)
     policy, other = read_table(args.policy)
     if meta != other or set(train.split)!={"fit"} or set(policy.split)!={"policy"}:
@@ -98,6 +101,8 @@ def fit(args):
         y = errors(train,target)
         for name,cols in LEARNED.items():
             part["models"][name] = fit_one(train,cols,y,False,args.seed)
+        if set(SEMANTIC) <= set(train) and set(SEMANTIC) <= set(policy):
+            part["models"]["P6S"] = fit_one(train,U+D+Q+SEMANTIC,y,False,args.seed)
         if args.mlp:
             part["models"]["MLP"] = fit_one(train,U+D+Q,y,True,args.seed)
         for name,score in scores(policy,part).items():
@@ -116,3 +121,4 @@ def route(table,part,c):
     accepted = risk <= part["thresholds"]["P6"][c]
     retake = (~accepted) & acquisition(table) & (table.ref_probability.to_numpy()<=part["retake"][c])
     return risk, accepted, np.where(accepted,"accept",np.where(retake,"retake","review"))
+

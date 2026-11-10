@@ -67,6 +67,14 @@ def build(task, arch, size, pretrained=False, retinal_weights=None):
             encoder.load_state_dict(interpolate_embeddings(size,16,state))
         encoder.heads = nn.Identity()
         return Heads(encoder, 768, task)
+    if arch in ("mobilenetv3", "efficientnetb0"):
+        if arch == "mobilenetv3":
+            encoder = models.mobilenet_v3_large(weights=models.MobileNet_V3_Large_Weights.IMAGENET1K_V2 if pretrained else None)
+        else:
+            encoder = models.efficientnet_b0(weights=models.EfficientNet_B0_Weights.IMAGENET1K_V1 if pretrained else None)
+        features = next(layer.in_features for layer in encoder.classifier if isinstance(layer, nn.Linear))
+        encoder.classifier = nn.Identity()
+        return Heads(encoder, features, task)
     factory, weights = {"r50":(models.resnet50, models.ResNet50_Weights.IMAGENET1K_V2),
                         "r18":(models.resnet18, models.ResNet18_Weights.IMAGENET1K_V1)}[arch]
     encoder = factory(weights=weights if pretrained else None)
@@ -80,3 +88,4 @@ def restore(path, device):
     net = build(data["task"], data["arch"], data["size"])
     net.load_state_dict(data.pop("state"))
     return net.eval().to(device), data
+

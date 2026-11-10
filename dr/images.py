@@ -1,6 +1,9 @@
 """Reproducible retinal preprocessing and controlled image corruption."""
 import hashlib
 import io
+import os
+import tempfile
+from pathlib import Path
 
 import numpy as np
 from PIL import Image, ImageFilter
@@ -18,7 +21,25 @@ def seed_for(*parts):
     return int.from_bytes(hashlib.sha256(payload).digest()[:8], "little")
 
 
-def prepare(path, size):
+def prepare(path, size, cache_dir=None):
+    if cache_dir:
+        source = Path(path).resolve()
+        stat = source.stat()
+        key = hashlib.sha256(f"prepare-v1|{source}|{stat.st_size}|{stat.st_mtime_ns}|{size}".encode()).hexdigest()
+        target = Path(cache_dir)/f"{key}.png"
+        if target.exists():
+            with Image.open(target) as cached:
+                return cached.convert("RGB")
+        image = prepare(path,size)
+        target.parent.mkdir(parents=True,exist_ok=True)
+        fd, temporary = tempfile.mkstemp(suffix=".png",dir=target.parent)
+        os.close(fd)
+        try:
+            image.save(temporary,format="PNG")
+            os.replace(temporary,target)
+        finally:
+            Path(temporary).unlink(missing_ok=True)
+        return image
     with Image.open(path) as source:
         image = source.convert("RGB")
     arr = np.asarray(image)
@@ -90,3 +111,4 @@ def sample_spec(rng, mixture=False, exclude=None):
     count = int(rng.integers(2,4)) if mixture else 1
     return [(str(rng.choice(OPERATORS[f])), int(rng.integers(1,6)))
             for f in rng.choice(families, count, replace=False)]
+

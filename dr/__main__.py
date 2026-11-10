@@ -26,6 +26,9 @@ def shared(p):
     p.add_argument("--device",default="auto",help="auto, cpu, cuda or cuda:0")
     p.add_argument("--batch",type=positive,default=8)
     p.add_argument("--workers",type=int,default=4)
+    p.add_argument("--precision", choices=["auto","fp32","fp16","bf16"], default="auto")
+    p.add_argument("--cache-dir")
+    p.add_argument("--overwrite", action="store_true")
 
 
 def sources(p):
@@ -59,15 +62,18 @@ def main():
     p.add_argument("--labels",nargs="+",required=True)
     p.add_argument("--images",required=True)
     p.add_argument("--out",required=True)
+    p.add_argument("--overwrite",action="store_true")
     p.add_argument("--seed",type=int,default=42)
     p = sub.add_parser("train")
     shared(p)
     p.add_argument("--manifest",required=True)
     p.add_argument("--task",choices=["grade","quality","damage"],required=True)
-    p.add_argument("--arch",choices=["r50","vit","retfound"],default="r50")
+    p.add_argument("--arch",choices=["r50","r18","mobilenetv3","efficientnetb0","vit","retfound"],default="r50")
     p.add_argument("--retinal-weights")
     p.add_argument("--epochs",type=positive,default=50)
     p.add_argument("--accumulate",type=positive,default=1)
+    p.add_argument("--condition-profile", help="Audited training-donor corruption profile JSON")
+    p.add_argument("--corruption-size", type=positive, help="Apply corruptions at this reference size before resizing")
     p.add_argument("--robust",action="store_true",help="Train the grader on additional synthetic views")
     p.add_argument("--exclude",choices=FAMILIES)
     p.add_argument("--scratch",action="store_true",help="No pretrained downloads; for smoke testing")
@@ -79,17 +85,21 @@ def main():
     p.add_argument("--mode",choices=["natural","balanced","balanced-real","suite","mixture"])
     p.add_argument("--exclude",choices=FAMILIES)
     p.add_argument("--out",required=True)
+    p.add_argument("--condition-profile")
+    p.add_argument("--corruption-size",type=positive)
     p = sub.add_parser("fit")
     p.add_argument("--fit",required=True)
     p.add_argument("--policy",required=True)
     p.add_argument("--out",required=True)
     p.add_argument("--seed",type=int,default=42)
+    p.add_argument("--overwrite",action="store_true")
     p.add_argument("--mlp",action="store_true")
     p.add_argument("--min-retakes",type=positive,default=20)
     p.add_argument("--max-referable-share",type=float,default=.05)
     p = sub.add_parser("evaluate")
     p.add_argument("--features",required=True)
     p.add_argument("--checker",required=True)
+    p.add_argument("--overwrite",action="store_true")
     p.add_argument("--bootstrap",type=int,default=0,help="Paired patient resamples; 2000 for study")
     p.add_argument("--out",required=True)
     p = sub.add_parser("predict")
@@ -99,10 +109,11 @@ def main():
     p.add_argument("--coverage",type=float,choices=[.8,.9],default=.8)
     args = parser.parse_args()
     if args.command == "prepare-eyeq":
-        make_eyeq(args.labels,args.images,args.out,args.seed)
+        make_eyeq(args.labels,args.images,args.out,args.seed,args.overwrite)
     else:
         {"train":train,"features":extract,"fit":fit,"evaluate":evaluate,"predict":predict}[args.command](args)
 
 
 if __name__ == "__main__":
     main()
+

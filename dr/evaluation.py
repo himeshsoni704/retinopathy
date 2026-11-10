@@ -7,6 +7,7 @@ import pandas as pd
 from sklearn.metrics import (average_precision_score, cohen_kappa_score, f1_score,
                              roc_auc_score)
 from .features import PROBS
+from .runtime import protect
 from .images import seed_for
 from .policy import COVERAGES, errors, read_table, route, scores
 
@@ -76,22 +77,54 @@ def paired_bootstrap(frame,y,main,other,count,rng):
     return np.quantile(diffs,[.025,.975])
 
 
+def classifier_intervals(frame, count, rng):
+    known = frame[frame.grade>=0].reset_index(drop=True)
+    if known.empty:
+        return []
+    blocks = list(known.groupby("patient",sort=False).indices.values())
+    samples = []
+    for _ in range(count):
+        indices = np.concatenate([blocks[i] for i in rng.integers(len(blocks),size=len(blocks))])
+        samples.append(classifier_summary(known.iloc[indices]))
+    result = []
+    for key, estimate in classifier_summary(known).items():
+        if key == "evaluable":
+            continue
+        values = np.asarray([s[key] for s in samples],dtype=float)
+        values = values[np.isfinite(values)]
+        if len(values):
+            lo,hi = np.quantile(values,[.025,.975])
+            result.append(dict(metric=key,estimate=float(estimate),lower95=float(lo),upper95=float(hi),
+                               valid_resamples=len(values),requested_resamples=count))
+    return result
+
+
 def evaluate(args):
     table,meta = read_table(args.features)
     bundle = joblib.load(args.checker)
     if bundle["meta"] != meta or not set(table.split)<={"test","external"}:
         raise ValueError("Evaluation requires held-out rows and the checker's original ensemble")
     out = Path(args.out)
+    if out.exists() and any(out.iterdir()) and not getattr(args,"overwrite",False):
+        raise FileExistsError("Use an empty report directory or --overwrite")
     out.mkdir(parents=True,exist_ok=True)
     rng = np.random.default_rng(bundle["seed"])
     results, grades, strata, overlaps, intervals = [], [], [], [], []
     groups = {"all":table, **{"family/"+str(k):v for k,v in table.groupby("family")},
               **{"variant/"+str(k):v for k,v in table.groupby("variant")}}
+    for label, mask in (("natural",table.variant=="original"),("synthetic",table.variant!="original")):
+        if mask.any():
+            groups[label] = table[mask]
+    curves = []
+    classifier_ci = []
     for quality,t in table[table.variant=="original"].groupby("quality"):
         groups[f"original/quality-{quality}"] = t
     for group,subset in groups.items():
         t = subset.reset_index(drop=True)
         grades.append({"group":group,**classifier_summary(t)})
+        if args.bootstrap and group in ("all","natural","synthetic"):
+            classifier_ci.extend(dict(group=group,**row) for row in classifier_intervals(
+                t,args.bootstrap,np.random.default_rng(seed_for(bundle["seed"],group,"classifier"))))
         known = t.grade.to_numpy()>=0
         tie = np.array([seed_for(bundle["seed"],i,v) for i,v in zip(t.image,t.variant)],dtype=np.uint64)
         for target,part in bundle["targets"].items():
@@ -103,6 +136,13 @@ def evaluate(args):
             for name,score in all_scores.items():
                 score = np.asarray(score,dtype=float)
                 evaluable_scores = score[known]
+                if group in ("all","natural","synthetic") and len(y):
+                    order_curve = np.argsort(evaluable_scores,kind="stable")
+                    ends = np.r_[np.flatnonzero(np.diff(evaluable_scores[order_curve])!=0),len(y)-1]
+                    failures = np.cumsum(y[order_curve])[ends]
+                    for end,bad in zip(ends,failures):
+                        curves.append(dict(group=group,target=target,policy=name,coverage=float((end+1)/len(y)),
+                                           selective_risk=float(bad/(end+1)),generalized_risk=float(bad/len(y))))
                 detection = {"augrc":augrc(y,evaluable_scores),
                              "auroc_failure":roc_auc_score(y,evaluable_scores) if len(set(y))==2 else np.nan,
                              "auprc_failure":average_precision_score(y,evaluable_scores) if len(set(y))==2 else np.nan,
@@ -132,15 +172,15 @@ def evaluate(args):
                     a,b = sets[x,c],sets[z,c]
                     overlaps.append({"group":group,"target":target,"budget":c,"A":x,"B":z,
                                      "jaccard":(a&b).sum()/(a|b).sum() if (a|b).any() else np.nan})
-            if args.bootstrap and group=="all" and known.any():
+            if args.bootstrap and group in ("all","natural","synthetic") and known.any():
                 for other in ("P2","P3","P5"):
                     lo,hi = paired_bootstrap(t[known].reset_index(drop=True),y,all_scores["P6"][known],
                                              all_scores[other][known],args.bootstrap,rng)
-                    intervals.append({"target":target,"comparison":"P6-"+other,
+                    intervals.append({"group":group,"target":target,"comparison":"P6-"+other,
                                       "augrc_difference":augrc(y,all_scores["P6"][known])-augrc(y,all_scores[other][known]),
                                       "lower95":lo,"upper95":hi})
     for key,values in (("policies",results),("grading",grades),("strata",strata),("overlap",overlaps),
-                       ("bootstrap",intervals)):
+                       ("bootstrap",intervals),("risk_coverage",curves),("classifier_bootstrap",classifier_ci)):
         if values:
             pd.DataFrame(values).to_csv(out/(key+".csv"),index=False)
     decisions = table.copy()
@@ -155,3 +195,4 @@ def evaluate(args):
                         "referable_share":(table.grade[selected]>=2).mean()})
     pd.DataFrame(retakes).to_csv(out/"retakes.csv",index=False)
     decisions.to_csv(out/"decisions.csv",index=False)
+

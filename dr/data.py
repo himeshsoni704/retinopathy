@@ -8,6 +8,9 @@ import torch
 from sklearn.model_selection import StratifiedGroupKFold
 from torch.utils.data import Dataset
 from torchvision.transforms import functional as TF
+from .runtime import protect
+from .conditioning import load_profile, sample_condition
+from PIL import Image
 from .images import FAMILIES, FAMILY_OF, degrade, prepare, sample_spec, seed_for
 
 SPLITS = ("train", "select", "cal", "fit", "policy", "test")
@@ -33,7 +36,8 @@ def read_manifest(path):
     return frame
 
 
-def make_eyeq(csvs, root, output, seed):
+def make_eyeq(csvs, root, output, seed, overwrite=False):
+    protect(output,overwrite)
     labels = pd.concat([pd.read_csv(p) for p in csvs], ignore_index=True)
     root = Path(root)
     wanted = set(labels.image)
@@ -65,11 +69,13 @@ def make_eyeq(csvs, root, output, seed):
 
 
 class Photos(Dataset):
-    def __init__(self, frame, size, seed, mode="natural", augment=False, exclude=None):
+    def __init__(self, frame, size, seed, mode="natural", augment=False, exclude=None, cache_dir=None, condition_profile=None, corruption_size=None, donor_patients=None):
         # natural: original rows. balanced: one clean and one synthetic copy per Good source.
         # suite: original rows plus all 50 variants of Good sources. mixture: one mixed copy per Good source.
         if mode in ("balanced","damage","mixture"):
             frame = frame[frame.quality == 0]
+        self.cache_dir, self.corruption_size = cache_dir, corruption_size
+        self.condition = load_profile(condition_profile, set(map(str,donor_patients if donor_patients is not None else frame.loc[frame.split=="train","patient"]))) if condition_profile else None
         self.frame = frame.reset_index(drop=True)
         self.size, self.seed, self.mode = size, seed, mode
         self.augment, self.exclude, self.epoch = augment, exclude, 0
@@ -92,7 +98,6 @@ class Photos(Dataset):
         row_id, op, level = self.items[index]
         row = self.frame.iloc[row_id]
         rng = np.random.default_rng(seed_for(self.seed, self.epoch, row.image, op, level))
-        image = prepare(row.path, self.size)
         if self.mode == "damage":
             roll = rng.random()
             spec = [] if roll < .2 else sample_spec(rng, roll > .65, self.exclude)
@@ -102,12 +107,17 @@ class Photos(Dataset):
             spec = [(op,level)]
         else:
             spec = []
+        if self.condition and spec and (self.mode=="damage" or op in ("balanced","mixture")):
+            spec = sample_condition(self.condition,rng,self.exclude)
+        image = prepare(row.path, self.corruption_size if spec and self.corruption_size else self.size, self.cache_dir)
         present = torch.zeros(8)
         severity = torch.zeros(8)
         for operator, strength in spec:
             image = degrade(image, operator, strength, rng)
             k = FAMILIES.index(FAMILY_OF[operator])
             present[k], severity[k] = 1., strength/5
+        if image.size != (self.size,self.size):
+            image = image.resize((self.size,self.size),Image.Resampling.LANCZOS)
         if self.augment:
             if rng.random() < .5:
                 image = TF.hflip(image)
@@ -118,3 +128,4 @@ class Photos(Dataset):
                 "family": "+".join(FAMILY_OF[o] for o,s in spec) or "original",
                 "variant": "+".join(f"{o}-{s}" for o,s in spec) or "original",
                 "split": row.split, "present": present, "severity": severity}
+

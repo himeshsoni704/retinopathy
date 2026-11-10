@@ -147,3 +147,12 @@ Use `python -m dr --help` and the per-command help for stage-level runs. The run
 ## Verification performed
 
 The public commands passed an end-to-end CPU smoke run on generated images using Python 3.12, PyTorch 2.5.1 and Torchvision 0.20.1. The run exercised real ResNet-50/18 training from random initialisation, temperature calibration, feature extraction, fitting both checkers, paired evaluation and single-image routing. The unit tests cover all 50 corruption settings, patient isolation, error denominators, unknown grades and AUGRC ties. Both transformer backbones also completed a 384 px CPU forward pass with random weights. The official RETFound checkpoint, real retinal cohorts, five-seed training and the target RTX workstation were not available for verification.
+
+
+## GPU profiling and research extensions
+
+See [the implementation and experiment guide](docs/RESEARCH_EXTENSION.md) for the 4 GB
+pilot command, dataset audits, explicit precision, prepared-image caching, lightweight
+architectures, training-donor-conditioned corruption, offline I-JEPA/DINOv2/grader
+representations, and controlled reliability ablations. Existing defaults remain unchanged.
+New modules do not constitute real-data or GPU performance results.
